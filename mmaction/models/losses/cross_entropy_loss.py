@@ -198,3 +198,80 @@ class CBFocalLoss(BaseWeightedLoss):
         focal_loss /= torch.sum(label_one_hot)
 
         return focal_loss
+
+
+@MODELS.register_module()
+class MultilabelCrossEntropyLoss(BaseWeightedLoss):
+    """Cross Entropy Loss.
+
+    Support two kinds of labels and their corresponding loss type. It's worth
+    mentioning that loss type will be detected by the shape of ``cls_score``
+    and ``label``.
+    1) Hard label: This label is an integer array and all of the elements are
+        in the range [0, num_classes - 1]. This label's shape should be
+        ``cls_score``'s shape with the `num_classes` dimension removed.
+    2) Soft label(probability distribution over classes): This label is a
+        probability distribution and all of the elements are in the range
+        [0, 1]. This label's shape must be the same as ``cls_score``. For now,
+        only 2-dim soft label is supported.
+
+    Args:
+        loss_weight (float): Factor scalar multiplied on the loss.
+            Defaults to 1.0.
+        class_weight (list[float] | None): Loss weight for each class. If set
+            as None, use the same weight 1 for all classes. Only applies
+            to CrossEntropyLoss and BCELossWithLogits (should not be set when
+            using other losses). Defaults to None.
+    """
+
+    def __init__(self,
+                 loss_weight: float = 1.0,
+                 class_weight: Optional[List[float]] = None,
+                 loss_weight_multilable: float=0.5) -> None:
+        super().__init__(loss_weight=loss_weight)
+        self.loss_weight_multilable = loss_weight_multilable
+        self.class_weight = None
+        if class_weight is not None:
+            self.class_weight = torch.Tensor(class_weight)
+
+    def _forward(self, cls_score: torch.Tensor, label: torch.Tensor,
+                 **kwargs) -> torch.Tensor:
+        """Forward function.
+
+        Args:
+            cls_score (torch.Tensor): The class score.
+            label (torch.Tensor): The ground truth label.
+            kwargs: Any keyword argument to be used to calculate
+                CrossEntropy loss.
+
+        Returns:
+            torch.Tensor: The returned CrossEntropy loss.
+        """
+        cls_dim = cls_score.shape # [N, 9]
+        label_dim = label.shape   # [N, 3]
+
+        #[N, 9] -> [N, 3, 3]
+        if cls_score.size() != label.size():
+            cls_score = cls_score.view(cls_dim[0],-1,label_dim[-1])
+
+        if self.class_weight is not None:
+            assert 'weight' not in kwargs, \
+                "The key 'weight' already exists."
+            kwargs['weight'] = self.class_weight.to(cls_score.device)
+
+        loss_intensity = F.cross_entropy(cls_score, label, reduction='none', **kwargs).mean(0)
+        
+        label_mul = torch.zeros(label.shape, device=cls_score.device, dtype=cls_score.dtype)
+        label_mul[label>0] = 1.0
+        cls_score_mul = cls_score.mean(-1)
+        loss_multicls = F.binary_cross_entropy_with_logits(cls_score_mul, label_mul)
+
+        loss_cls = {
+            'rain': loss_intensity[0],
+            'fog': loss_intensity[1],
+            'snow': loss_intensity[2],
+            'loss_cls': (1-self.loss_weight_multilable)*loss_intensity.sum(),
+            'loss_mul': self.loss_weight_multilable*loss_multicls
+        }
+
+        return loss_cls # its a dict {'rain': , 'fog': , 'snow': , 'loss_cls': , "loss_mul": } # only the key with 'loss' str will be used for training

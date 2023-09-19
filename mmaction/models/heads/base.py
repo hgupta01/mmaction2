@@ -121,18 +121,17 @@ class BaseHead(BaseModule, metaclass=ABCMeta):
             labels = labels.unsqueeze(0)
         elif labels.dim() == 1 and labels.size()[0] == self.num_classes \
                 and cls_scores.size()[0] == 1:
-            # Fix a bug when training with soft labels and batch size is 1.
-            # When using soft labels, `labels` and `cls_score` share the same
-            # shape.
             labels = labels.unsqueeze(0)
 
-        if cls_scores.size() != labels.size():
-            top_k_acc = top_k_accuracy(cls_scores.detach().cpu().numpy(),
-                                       labels.detach().cpu().numpy(),
-                                       self.topk)
-            for k, a in zip(self.topk, top_k_acc):
-                losses[f'top{k}_acc'] = torch.tensor(
-                    a, device=cls_scores.device)
+        ### commented the following / not required
+        # if cls_scores.size() != labels.size():
+        #     top_k_acc = top_k_accuracy(cls_scores.detach().cpu().numpy(),
+        #                                labels.detach().cpu().numpy(),
+        #                                self.topk)
+        #     for k, a in zip(self.topk, top_k_acc):
+        #         losses[f'top{k}_acc'] = torch.tensor(
+        #             a, device=cls_scores.device)
+
         if self.label_smooth_eps != 0:
             if cls_scores.size() != labels.size():
                 labels = F.one_hot(labels, num_classes=self.num_classes)
@@ -183,10 +182,15 @@ class BaseHead(BaseModule, metaclass=ABCMeta):
         """
         num_segs = cls_scores.shape[0] // len(data_samples)
         cls_scores = self.average_clip(cls_scores, num_segs=num_segs)
-        pred_labels = cls_scores.argmax(dim=-1, keepdim=True).detach()
+        cls_scores = cls_scores.view(-1, 3, 3)
+        
+        if self.average_clips == 'prob':
+            pred_labels = cls_scores.argmax(dim=1).detach()
+        elif self.average_clips == 'score':
+            pred_labels = F.softmax(cls_scores, dim=-1).argmax(dim=1).detach()
 
         for data_sample, score, pred_label in zip(data_samples, cls_scores,
-                                                  pred_labels):
+                                                pred_labels):
             prediction = LabelData(item=score)
             pred_label = LabelData(item=pred_label)
             data_sample.pred_scores = prediction
@@ -209,7 +213,8 @@ class BaseHead(BaseModule, metaclass=ABCMeta):
         Returns:
             torch.Tensor: Averaged class scores.
         """
-
+        ### For my use case, I only use single clip so averging is not required
+        ### Confirm with TSM network
         if self.average_clips not in ['score', 'prob', None]:
             raise ValueError(f'{self.average_clips} is not supported. '
                              f'Currently supported ones are '
@@ -219,10 +224,11 @@ class BaseHead(BaseModule, metaclass=ABCMeta):
         cls_scores = cls_scores.view((batch_size // num_segs, num_segs) +
                                      cls_scores.shape[1:])
 
+        ### Changed the 'prob' method
         if self.average_clips is None:
             return cls_scores
         elif self.average_clips == 'prob':
-            cls_scores = F.softmax(cls_scores, dim=2).mean(dim=1)
+            cls_scores = F.softmax(cls_scores, dim=-1).mean(dim=1)
         elif self.average_clips == 'score':
             cls_scores = cls_scores.mean(dim=1)
 
